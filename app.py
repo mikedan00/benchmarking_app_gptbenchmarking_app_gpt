@@ -835,6 +835,419 @@ def generate_report(guide, my_co, my_prod, comp_co, comp_prod, my_voc, comp_voc,
     return call_llm(prompt, max_tokens=4096, system=system)
 
 
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MS OFFICE EXPORTERS: DOCX / PPTX
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def safe_filename(value: str, fallback: str = "benchmarking_report") -> str:
+    value = clean_text(value or "")
+    value = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", value).strip("._-")
+    return value[:120] or fallback
+
+
+def strip_md_inline(text: str) -> str:
+    """다운로드 문서용 간단 마크다운 인라인 제거."""
+    text = html.unescape(str(text or ""))
+    text = re.sub(r"!\[[^\]]*\]\([^\)]*\)", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^\)]*\)", r"\1", text)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"\*([^*]+)\*", r"\1", text)
+    text = re.sub(r"_([^_]+)_", r"\1", text)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_md_table(lines: list[str], start_idx: int):
+    """마크다운 테이블을 (headers, rows, next_idx)로 파싱. 아니면 None 반환."""
+    if start_idx + 1 >= len(lines):
+        return None
+    line = lines[start_idx].strip()
+    sep = lines[start_idx + 1].strip()
+    if "|" not in line or "|" not in sep:
+        return None
+    if not re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", sep):
+        return None
+
+    def split_row(row: str) -> list[str]:
+        row = row.strip().strip("|")
+        return [strip_md_inline(c.strip()) for c in row.split("|")]
+
+    headers = split_row(line)
+    rows = []
+    i = start_idx + 2
+    while i < len(lines) and "|" in lines[i]:
+        if lines[i].strip():
+            row = split_row(lines[i])
+            if len(row) < len(headers):
+                row += [""] * (len(headers) - len(row))
+            rows.append(row[:len(headers)])
+        i += 1
+    return headers, rows, i
+
+
+def add_docx_korean_font(run, size_pt: int | None = None, bold: bool | None = None):
+    try:
+        from docx.oxml.ns import qn
+        run.font.name = "Malgun Gothic"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "Malgun Gothic")
+        if size_pt:
+            from docx.shared import Pt
+            run.font.size = Pt(size_pt)
+        if bold is not None:
+            run.bold = bold
+    except Exception:
+        pass
+
+
+def build_docx_report_bytes(report_md: str, metadata: dict | None = None) -> bytes:
+    """마크다운 보고서를 Word(.docx) 파일 bytes로 변환."""
+    from docx.shared import Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    metadata = metadata or {}
+    doc = DocxDocument()
+
+    # 기본 스타일
+    try:
+        normal = doc.styles["Normal"]
+        normal.font.name = "Malgun Gothic"
+        normal.font.size = Pt(10.5)
+        for sty_name, size in [("Title", 22), ("Heading 1", 18), ("Heading 2", 15), ("Heading 3", 13)]:
+            sty = doc.styles[sty_name]
+            sty.font.name = "Malgun Gothic"
+            sty.font.size = Pt(size)
+            sty.font.color.rgb = RGBColor(30, 64, 175)
+    except Exception:
+        pass
+
+    title = metadata.get("title") or "AI 벤치마킹 보고서"
+    subtitle = metadata.get("subtitle") or ""
+    meta_line = metadata.get("meta_line") or f"생성일: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    p_title = doc.add_paragraph()
+    p_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p_title.add_run(title)
+    add_docx_korean_font(r, 22, True)
+
+    if subtitle:
+        p_sub = doc.add_paragraph()
+        p_sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p_sub.add_run(subtitle)
+        add_docx_korean_font(r, 12, False)
+
+    p_meta = doc.add_paragraph()
+    p_meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p_meta.add_run(meta_line)
+    add_docx_korean_font(r, 9, False)
+    doc.add_paragraph("")
+
+    lines = (report_md or "").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        line = raw.strip()
+
+        if not line:
+            i += 1
+            continue
+
+        parsed_table = parse_md_table(lines, i)
+        if parsed_table:
+            headers, rows, next_i = parsed_table
+            table = doc.add_table(rows=1, cols=max(1, len(headers)))
+            table.style = "Table Grid"
+            for c, head in enumerate(headers):
+                cell = table.rows[0].cells[c]
+                cell.text = head
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        add_docx_korean_font(run, 9, True)
+            for row in rows[:80]:
+                cells = table.add_row().cells
+                for c, val in enumerate(row):
+                    cells[c].text = val
+                    for para in cells[c].paragraphs:
+                        for run in para.runs:
+                            add_docx_korean_font(run, 9, False)
+            doc.add_paragraph("")
+            i = next_i
+            continue
+
+        if re.match(r"^---+$", line):
+            doc.add_paragraph("────────────────────────────────────────")
+            i += 1
+            continue
+
+        m = re.match(r"^(#{1,4})\s+(.+)$", line)
+        if m:
+            level = min(len(m.group(1)), 3)
+            txt = strip_md_inline(m.group(2))
+            p = doc.add_heading(txt, level=level)
+            for run in p.runs:
+                add_docx_korean_font(run, 18 if level == 1 else 15 if level == 2 else 13, True)
+            i += 1
+            continue
+
+        if line.startswith(">"):
+            p = doc.add_paragraph(strip_md_inline(line.lstrip("> ")), style="Intense Quote")
+            for run in p.runs:
+                add_docx_korean_font(run, 10, False)
+            i += 1
+            continue
+
+        if re.match(r"^[-*+]\s+", line):
+            p = doc.add_paragraph(strip_md_inline(re.sub(r"^[-*+]\s+", "", line)), style="List Bullet")
+            for run in p.runs:
+                add_docx_korean_font(run, 10, False)
+            i += 1
+            continue
+
+        if re.match(r"^\d+[.)]\s+", line):
+            p = doc.add_paragraph(strip_md_inline(re.sub(r"^\d+[.)]\s+", "", line)), style="List Number")
+            for run in p.runs:
+                add_docx_korean_font(run, 10, False)
+            i += 1
+            continue
+
+        p = doc.add_paragraph(strip_md_inline(line))
+        for run in p.runs:
+            add_docx_korean_font(run, 10, False)
+        i += 1
+
+    # Footer
+    try:
+        section = doc.sections[0]
+        footer = section.footer.paragraphs[0]
+        footer.text = "AI 벤치마킹 보고서 자동 작성 시스템"
+        footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in footer.runs:
+            add_docx_korean_font(run, 8, False)
+    except Exception:
+        pass
+
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def split_report_sections(report_md: str) -> list[tuple[str, list[str]]]:
+    """PPT 슬라이드용으로 H2 기준 섹션 분리."""
+    sections = []
+    current_title = "핵심 요약"
+    current_lines: list[str] = []
+    for raw in (report_md or "").splitlines():
+        line = raw.strip()
+        if not line or re.match(r"^---+$", line):
+            continue
+        m = re.match(r"^##\s+(.+)$", line)
+        if m:
+            if current_lines:
+                sections.append((strip_md_inline(current_title), current_lines))
+            current_title = strip_md_inline(m.group(1))
+            current_lines = []
+            continue
+        if line.startswith("# "):
+            continue
+        if "|" in line and re.search(r"\|\s*:?-{3,}:?", line):
+            continue
+        if "|" in line and len(line) > 20:
+            # 표는 별도 데이터 또는 DOCX에서 처리하고 PPT에는 과밀 방지 목적으로 생략
+            continue
+        clean = strip_md_inline(re.sub(r"^(#{3,4})\s+", "", line))
+        clean = re.sub(r"^[-*+]\s+", "", clean)
+        clean = re.sub(r"^\d+[.)]\s+", "", clean)
+        if clean and len(clean) > 2:
+            current_lines.append(clean)
+    if current_lines:
+        sections.append((strip_md_inline(current_title), current_lines))
+    return sections
+
+
+def compact_bullets(lines: list[str], max_items: int = 7, max_chars: int = 115) -> list[str]:
+    bullets = []
+    seen = set()
+    for line in lines:
+        line = strip_md_inline(line)
+        if not line or line in seen:
+            continue
+        seen.add(line)
+        if len(line) > max_chars:
+            line = line[:max_chars - 1].rstrip() + "…"
+        bullets.append(line)
+        if len(bullets) >= max_items:
+            break
+    return bullets
+
+
+def add_pptx_bullet_slide(prs, title: str, bullets: list[str], accent_rgb=(30, 64, 175)):
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+
+    blank = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(blank)
+
+    # 상단 타이틀
+    title_box = slide.shapes.add_textbox(Inches(0.55), Inches(0.35), Inches(12.2), Inches(0.55))
+    tf = title_box.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    r = p.add_run()
+    r.text = title[:64]
+    r.font.size = Pt(28)
+    r.font.bold = True
+    r.font.name = "Malgun Gothic"
+    r.font.color.rgb = RGBColor(*accent_rgb)
+
+    body_box = slide.shapes.add_textbox(Inches(0.78), Inches(1.25), Inches(11.85), Inches(5.65))
+    tf = body_box.text_frame
+    tf.word_wrap = True
+    tf.clear()
+    for idx, bullet in enumerate(bullets or ["요약 항목 없음"]):
+        p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
+        p.text = bullet
+        p.level = 0
+        p.font.size = Pt(18 if len(bullet) < 80 else 16)
+        p.font.name = "Malgun Gothic"
+        p.space_after = Pt(10)
+
+    return slide
+
+
+def build_pptx_report_bytes(report_md: str, metadata: dict | None = None, voc_my: dict | None = None, voc_comp: dict | None = None, spec_comp: dict | None = None) -> bytes:
+    """마크다운 보고서를 PowerPoint(.pptx) 요약 덱으로 변환."""
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+
+    metadata = metadata or {}
+    voc_my = voc_my or {}
+    voc_comp = voc_comp or {}
+    spec_comp = spec_comp or {}
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+
+    # Title slide
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    bg = slide.background.fill
+    bg.solid()
+    bg.fore_color.rgb = RGBColor(15, 23, 42)
+    title = metadata.get("title") or "AI 벤치마킹 보고서"
+    subtitle = metadata.get("subtitle") or ""
+    meta_line = metadata.get("meta_line") or datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    tb = slide.shapes.add_textbox(Inches(0.85), Inches(1.65), Inches(11.7), Inches(1.2))
+    tf = tb.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    r = p.add_run()
+    r.text = title
+    r.font.name = "Malgun Gothic"
+    r.font.size = Pt(40)
+    r.font.bold = True
+    r.font.color.rgb = RGBColor(255, 255, 255)
+
+    sb = slide.shapes.add_textbox(Inches(0.9), Inches(3.0), Inches(11.2), Inches(0.85))
+    tf = sb.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    r = p.add_run()
+    r.text = subtitle
+    r.font.name = "Malgun Gothic"
+    r.font.size = Pt(20)
+    r.font.color.rgb = RGBColor(203, 213, 225)
+
+    mb = slide.shapes.add_textbox(Inches(0.9), Inches(5.85), Inches(11), Inches(0.4))
+    tf = mb.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    r = p.add_run()
+    r.text = meta_line
+    r.font.name = "Malgun Gothic"
+    r.font.size = Pt(13)
+    r.font.color.rgb = RGBColor(148, 163, 184)
+
+    # VOC summary slide
+    if isinstance(voc_my, dict) or isinstance(voc_comp, dict):
+        my_name = metadata.get("my_company") or voc_my.get("company", "자사")
+        comp_name = metadata.get("competitor") or voc_comp.get("company", "경쟁사")
+        bullets = []
+        for label, data in [(my_name, voc_my), (comp_name, voc_comp)]:
+            if isinstance(data, dict) and data:
+                bullets.append(f"{label}: VOC {data.get('voc_count', 'N/A')}건 · 대표 감성 {data.get('overall_sentiment', 'N/A')} · 만족도 {data.get('satisfaction_score', 'N/A')}")
+                if data.get("top_negatives"):
+                    bullets.append(f"{label} 주요 불만: {', '.join(map(str, data.get('top_negatives', [])[:3]))}")
+                if data.get("top_positives"):
+                    bullets.append(f"{label} 긍정 포인트: {', '.join(map(str, data.get('top_positives', [])[:3]))}")
+        if bullets:
+            add_pptx_bullet_slide(prs, "VOC 분석 요약", compact_bullets(bullets, 7, 140))
+
+    # Spec matrix table slide
+    matrix = spec_comp.get("spec_matrix") if isinstance(spec_comp, dict) else None
+    if isinstance(matrix, list) and matrix:
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        title_box = slide.shapes.add_textbox(Inches(0.55), Inches(0.35), Inches(12.2), Inches(0.55))
+        tf = title_box.text_frame
+        tf.clear()
+        p = tf.paragraphs[0]
+        r = p.add_run()
+        r.text = "제품 사양 비교 매트릭스"
+        r.font.size = Pt(28)
+        r.font.bold = True
+        r.font.name = "Malgun Gothic"
+        r.font.color.rgb = RGBColor(30, 64, 175)
+
+        rows = min(len(matrix), 8) + 1
+        cols = 5
+        table_shape = slide.shapes.add_table(rows, cols, Inches(0.55), Inches(1.25), Inches(12.2), Inches(5.65))
+        table = table_shape.table
+        headers = ["항목", "자사", "경쟁사", "우위", "비고"]
+        for c, h in enumerate(headers):
+            table.cell(0, c).text = h
+        for r_idx, item in enumerate(matrix[:8], start=1):
+            values = [
+                item.get("category", ""), item.get("my_value", ""), item.get("comp_value", ""),
+                item.get("winner", ""), item.get("note", "")
+            ]
+            for c, val in enumerate(values):
+                txt = strip_md_inline(str(val))
+                table.cell(r_idx, c).text = txt[:75] + ("…" if len(txt) > 75 else "")
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.text_frame.paragraphs:
+                    para.font.size = Pt(9)
+                    para.font.name = "Malgun Gothic"
+
+    # Main report sections
+    for section_title, lines in split_report_sections(report_md)[:9]:
+        bullets = compact_bullets(lines, max_items=7)
+        if bullets:
+            add_pptx_bullet_slide(prs, section_title, bullets)
+
+    # Recommendation slide
+    rec = spec_comp.get("strategic_recommendation") if isinstance(spec_comp, dict) else ""
+    if rec:
+        add_pptx_bullet_slide(prs, "전략적 권고사항", compact_bullets([str(rec)], max_items=3, max_chars=160), accent_rgb=(124, 58, 237))
+
+    # Closing slide
+    add_pptx_bullet_slide(prs, "Appendix", [
+        "본 덱은 앱에서 생성된 마크다운 보고서를 기반으로 자동 변환되었습니다.",
+        "상세 표와 원문형 보고서는 DOCX/Markdown 파일을 함께 확인하세요.",
+        f"생성 모델: {metadata.get('model', '')}",
+    ], accent_rgb=(8, 145, 178))
+
+    bio = BytesIO()
+    prs.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SIDEBAR
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1381,11 +1794,20 @@ with tab4:
         st.markdown("---")
 
         today_str = datetime.now().strftime("%Y%m%d_%H%M")
-        fname = f"benchmarking_{st.session_state.my_company}_vs_{st.session_state.competitor}_{today_str}"
-        dl1, dl2, dl3 = st.columns(3)
+        raw_fname = f"benchmarking_{st.session_state.my_company}_vs_{st.session_state.competitor}_{today_str}"
+        fname = safe_filename(raw_fname)
+        export_meta = {
+            "title": f"벤치마킹 보고서: {st.session_state.my_company or r_my_co} vs {st.session_state.competitor or r_cp_co}",
+            "subtitle": f"대상 제품: {st.session_state.my_product or r_my_pr} vs {st.session_state.comp_product or r_cp_pr}",
+            "meta_line": f"작성일: {datetime.now().strftime('%Y-%m-%d %H:%M')} | 모델: {st.session_state.model_id}",
+            "model": st.session_state.model_id,
+            "my_company": st.session_state.my_company or r_my_co,
+            "competitor": st.session_state.competitor or r_cp_co,
+        }
+        dl1, dl2, dl3, dl4, dl5 = st.columns(5)
 
         with dl1:
-            st.download_button("📥 Markdown 다운로드", st.session_state.report_md,
+            st.download_button("📥 Markdown", st.session_state.report_md,
                                f"{fname}.md", "text/markdown", use_container_width=True)
         with dl2:
             html_doc = f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">
@@ -1395,9 +1817,33 @@ h1{{color:#1e40af;border-bottom:3px solid #1e40af;padding-bottom:12px}}h2{{color
 table{{border-collapse:collapse;width:100%;margin:16px 0}}th{{background:#1e40af;color:white;padding:10px 14px}}
 td{{padding:9px 14px;border-bottom:1px solid #e2e8f0}}tr:nth-child(even){{background:#f8fafc}}</style>
 </head><body>{st.session_state.report_md.replace(chr(10),'<br>')}</body></html>"""
-            st.download_button("📥 HTML 다운로드", html_doc,
+            st.download_button("📥 HTML", html_doc,
                                f"{fname}.html", "text/html", use_container_width=True)
         with dl3:
+            try:
+                docx_bytes = build_docx_report_bytes(st.session_state.report_md, export_meta)
+                st.download_button("📥 Word DOCX", docx_bytes,
+                                   f"{fname}.docx",
+                                   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                   use_container_width=True)
+            except Exception as e:
+                st.error(f"DOCX 생성 오류: {e}")
+        with dl4:
+            try:
+                pptx_bytes = build_pptx_report_bytes(
+                    st.session_state.report_md,
+                    export_meta,
+                    st.session_state.voc_analyzed_my,
+                    st.session_state.voc_analyzed_comp,
+                    st.session_state.spec_comparison,
+                )
+                st.download_button("📥 PowerPoint PPTX", pptx_bytes,
+                                   f"{fname}.pptx",
+                                   "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                   use_container_width=True)
+            except Exception as e:
+                st.error(f"PPTX 생성 오류: {e}")
+        with dl5:
             full_json = json.dumps({
                 "metadata": {"generated_at": datetime.now().isoformat(), "model": st.session_state.model_id,
                              "my_company": st.session_state.my_company, "competitor": st.session_state.competitor},

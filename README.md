@@ -1,8 +1,15 @@
 # 📊 AI 벤치마킹 보고서 자동 작성 시스템
 
-> HuggingFace LLM (`google/gemma-4-26B-A4B-it`) × Multi-source VOC Collector × Streamlit
+> HuggingFace LLM (`google/gemma-4-26B-A4B-it`) × Multi-source VOC Collector × Streamlit × MS Office Export
 
 ---
+
+## 🆕 주요 기능
+
+- 멀티소스 VOC 자동 수집: DuckDuckGo 웹/뉴스, Google News RSS
+- VOC 중복 제거, 도메인 추출, 채널 분류, 카테고리/감성 힌트 자동 태깅
+- LLM 기반 VOC 심층 분석 및 제품 사양 비교
+- 보고서 다운로드: Markdown, HTML, **Word(.docx)**, **PowerPoint(.pptx)**, JSON
 
 ## 🗂️ 프로젝트 구조
 
@@ -54,7 +61,7 @@ chmod +x run.sh
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate       # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+pip install -U -r requirements.txt
 streamlit run app.py
 ```
 
@@ -187,3 +194,12 @@ HF_TOKEN = "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 HF_MODEL_ID = "google/gemma-4-26B-A4B-it"
 HF_PROVIDER = "auto"
 ```
+
+
+### DOCX/PPTX 다운로드
+
+보고서 생성 후 Step 4 하단에서 다음 형식으로 바로 다운로드할 수 있습니다.
+
+- Word DOCX: 본문형 보고서, 표 포함
+- PowerPoint PPTX: 발표용 요약 덱, VOC/사양 비교 슬라이드 포함
+
